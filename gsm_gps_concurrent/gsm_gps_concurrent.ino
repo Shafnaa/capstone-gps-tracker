@@ -19,21 +19,22 @@ struct location
 
 String apn = "TSEL-SNS";
 
-String serverName = "https://ycppywtjigaamvdfjfge.supabase.co";
-String pathName = "/rest/v1/tracks";
-String apiKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InljcHB5d3RqaWdhYW12ZGZqZmdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTYzMDMxOTEsImV4cCI6MjAzMTg3OTE5MX0.T-WZ2m4MEMV_7aHcv0R5Md9Iixj1gQU-CmSPRaYrKuA";
+String serverName = "http://sherlockin.000webhostapp.com";
+String postPath = "/api.php";
+String getPath = "/data.php";
+String apiKey = "kepston";
 
-location currentLocation;
+location currentLocation, oldLocation;
 
 JsonDocument request;
+
+int await = 3000, awaitSetup = 3000;
 
 void setup()
 {
   Serial.begin(115200);
   Serial2.begin(9600);
   SerialPort.begin(9600, SERIAL_8N1, 4, 2);
-
-  delay(3000);
 
   xTaskCreatePinnedToCore(
       updateLocation, /* Task function. */
@@ -44,9 +45,17 @@ void setup()
       &gpsTask,       /* Task handle to keep track of created task */
       0);
 
-  modemInit();
+  // while (!Serial2.available())
+  // {
+  //   delay(500);
+  //   Serial.print(".");
+  // }
 
-  delay(2000);
+  Serial.println("Configuring GPRS...");
+  gsm_send_serial("AT+SAPBR=3,1,Contype,\"GPRS\"", await);
+  gsm_send_serial("AT+SAPBR=3,1,APN,\"" + apn + "\"", await);
+
+  delay(15000);
 }
 
 void loop()
@@ -54,19 +63,22 @@ void loop()
   while (currentLocation.lat == NULL || currentLocation.lon == NULL)
     ;
 
-  delay(15000);
+  postData();
 }
 
 void updateLocation(void *pvParameters)
 {
   for (;;)
   {
-    while (Serial2.available())
+    while (SerialPort.available())
     {
-      if (gps.encode(Serial2.read()))
+      if (gps.encode(SerialPort.read()))
       {
         if (gps.location.isValid())
         {
+          oldLocation.lat = currentLocation.lat;
+          oldLocation.lon = currentLocation.lon;
+
           currentLocation.lat = gps.location.lat();
           currentLocation.lon = gps.location.lng();
 
@@ -83,31 +95,65 @@ void updateLocation(void *pvParameters)
 
 void postData()
 {
-  String serverPath = serverName + pathName;
-
   String httpRequestData;
 
-  request["lat"] = currentLocation.lat;
-  request["lon"] = currentLocation.lon;
+  request["latitude"] = currentLocation.lat;
+  request["longitude"] = currentLocation.lon;
 
   convertFromJson(request, httpRequestData);
 
   httpPost(httpRequestData);
 }
 
+void getState()
+{
+}
+
 void modemInit()
 {
   Serial.println("Configuring GPRS...");
-  gsm_send_serial("AT+SAPBR=3,1,Contype,\"GPRS\"");
-  gsm_send_serial("AT+SAPBR=3,1,APN,\"" + apn + "\"");
+  gsm_send_serial("AT+SAPBR=3,1,Contype,\"GPRS\"", await);
+  gsm_send_serial("AT+SAPBR=3,1,APN,\"" + apn + "\"", await);
 }
 
-void gsm_send_serial(String command)
+void httpPost(String postData)
+{
+  Serial.println("Starting post request...");
+  gsm_send_serial("AT+SAPBR=1,1", await);
+  gsm_send_serial("AT+SAPBR=2,1", await);
+  gsm_send_serial("AT+HTTPINIT", await);
+  gsm_send_serial("AT+HTTPPARA=\"CID\",1", await);
+  gsm_send_serial("AT+HTTPPARA=\"URL\",\"" + serverName + postPath + "\"", await);
+  gsm_send_serial("AT+HTTPPARA=\"USERDATA\",\"Authorization: Bearer " + apiKey + "\"", await);
+  gsm_send_serial("AT+HTTPPARA=\"CONTENT\",\"application/json\"", await);
+  gsm_send_serial("AT+HTTPDATA=" + String(postData.length()) + ",10000", await);
+  gsm_send_serial(postData, await);
+  gsm_send_serial("AT+HTTPACTION=1", await);
+  gsm_send_serial("AT+HTTPREAD", await);
+  gsm_send_serial("AT+HTTPTERM", await);
+  gsm_send_serial("AT+SAPBR=0,1", await);
+}
+
+void httpGet()
+{
+  Serial.println("Starting get request...");
+  gsm_send_serial("AT+SAPBR=1,1", await);
+  gsm_send_serial("AT+SAPBR=2,1", await);
+  gsm_send_serial("AT+HTTPINIT", await);
+  gsm_send_serial("AT+HTTPPARA=\"CID\",1", await);
+  gsm_send_serial("AT+HTTPPARA=\"URL\",\"" + serverName + postPath + "\"", await);
+  gsm_send_serial("AT+HTTPACTION=0", await);
+  gsm_send_serial("AT+HTTPREAD", await);
+  gsm_send_serial("AT+HTTPTERM", await);
+  gsm_send_serial("AT+SAPBR=0,1", await);
+}
+
+void gsm_send_serial(String command, int await)
 {
   Serial.println("Send ->: " + command);
   Serial2.println(command);
   long wtimer = millis();
-  while (wtimer + 3000 > millis())
+  while (wtimer + await > millis())
   {
     while (Serial2.available())
     {
@@ -115,27 +161,4 @@ void gsm_send_serial(String command)
     }
   }
   Serial.println();
-}
-
-String toJson(location location)
-{
-  return "{\"lat\":" + String(location.lat, 6U) + ",\"lon\":" + String(location.lon, 6U) + "}";
-}
-
-void httpPost(String postData)
-{
-  Serial.println("Starting post request...");
-  gsm_send_serial("AT+SAPBR=1,1");
-  gsm_send_serial("AT+SAPBR=2,1");
-  gsm_send_serial("AT+HTTPINIT");
-  gsm_send_serial("AT+HTTPPARA=\"CID\",1");
-  gsm_send_serial("AT+HTTPPARA=\"URL\",\"" + serverName + pathName + "\"");
-  gsm_send_serial("AT+HTTPPARA=\"USERDATA\",\"Authorization: Bearer " + apiKey + "\"");
-  gsm_send_serial("AT+HTTPPARA=\"USERDATA\",\"apiKey: " + apiKey + "\"");
-  gsm_send_serial("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
-  gsm_send_serial("AT+HTTPDATA=" + String(postData.length()) + ",10000");
-  gsm_send_serial(postData);
-  gsm_send_serial("AT+HTTPREAD");
-  gsm_send_serial("AT+HTTPTERM");
-  gsm_send_serial("AT+SAPBR=0,1");
 }
