@@ -23,9 +23,9 @@ const char gprsPass[] = "";
 const char simPIN[] = "";
 
 // MQTT details
-const char *broker = "e7b5d7dd2b6748039dce14722690c947.s1.eu.hivemq.cloud"; // Public IP address or domain name
-const char *mqttUsername = "capstone";                                      // MQTT username
-const char *mqttPassword = "khNgU.rdT.4mg3W";                               // MQTT password
+const char *broker = "5dda2b51fb16459eb2e2de9ea499b546.s1.eu.hivemq.cloud"; // Public IP address or domain name
+const char *mqttUsername = "admin";                                      // MQTT username
+const char *mqttPassword = "Admin123";                               // MQTT password
 const int mqttPort = 8883;
 
 const char *topicEngine = "esp/engine";
@@ -49,7 +49,7 @@ TinyGsm modem(SerialAT);
 #include <TinyGPSPlus.h>
 #include <ArduinoJson.h>
 
-TinyGsmClient client(modem);
+TinyGsmClientSecure client(modem);
 PubSubClient mqtt(client);
 TinyGPSPlus gps;
 HardwareSerial SerialGPS(1);
