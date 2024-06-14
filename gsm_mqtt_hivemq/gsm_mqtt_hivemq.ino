@@ -1,3 +1,54 @@
+// Select your modem:
+#define TINY_GSM_MODEM_SIM800
+
+// Set serial for debug console (to the Serial Monitor, default speed 115200)
+#define SerialMon Serial
+
+// Set serial for AT commands (to the module)
+#define SerialAT Serial2
+
+// See all AT commands, if wanted
+// #define DUMP_AT_COMMANDS
+
+// Define the serial console for debug prints, if needed
+#define TINY_GSM_DEBUG SerialMon
+
+// Range to attempt to autobaud
+// NOTE:  DO NOT AUTOBAUD in production code.  Once you've established
+// communication, set a fixed baud rate using modem.setBaud(#).
+#define GSM_AUTOBAUD_MIN 9600
+#define GSM_AUTOBAUD_MAX 115200
+
+// Define how you're planning to connect to the internet.
+// This is only needed for this example, not in other code.
+#define TINY_GSM_USE_GPRS true
+#define TINY_GSM_USE_WIFI false
+
+// set GSM PIN, if any
+#define GSM_PIN ""
+
+// Your GPRS credentials, if any
+const char apn[] = "Telkomsel";
+const char gprsUser[] = "wap";
+const char gprsPass[] = "wap123";
+
+// Your WiFi connection credentials, if applicable
+const char wifiSSID[] = "YourSSID";
+const char wifiPass[] = "YourWiFiPass";
+
+// MQTT details
+const char *broker = "5dda2b51fb16459eb2e2de9ea499b546.s1.eu.hivemq.cloud";
+const char *mqttUser = "admin";
+const char *mqttPass = "Admin123";
+
+const char *topicLed = "saujanashafi/esp/engine";
+const char *topicLedStatus = "saujanashafi/esp/start";
+const char *topicInit = "saujanashafi/esp/gps";
+
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include "SSLClient.h"
+
 // This is the root CA certificate
 const char root_ca[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
@@ -33,80 +84,24 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 
-// Select your modem:
-#define TINY_GSM_MODEM_SIM800
-
-// Set serial for debug console (to the Serial Monitor, default speed 115200)
-#define SerialMon Serial
-
-// Set serial for AT commands (to the module)
-#define SerialAT Serial2
-
-// Set serial for GPS module
-#define SerialGPS SerialPort
-
-// Define the serial console for debug prints, if needed
-#define TINY_GSM_DEBUG SerialMon
-
-// set GSM PIN, if any
-#define GSM_PIN ""
-
-// Your GPRS credentials, if any
-const char apn[] = "Telkomsel";
-const char gprsUser[] = "wap";
-const char gprsPass[] = "wap123";
-
-// MQTT details
-const char *broker = "e7b5d7dd2b6748039dce14722690c947.s1.eu.hivemq.cloud";
-const char *brokerId = "capstone-gps-tracker";
-const char *brokerUser = "capstone";
-const char *brokerPass = "Capstone123";
-
-const char *topicEngine = "saujanashafi/esp/engine";
-const char *topicEngineStatus = "saujanashafi/esp/engine/status";
-const char *topicStart = "saujanashafi/esp/start";
-const char *topicStartStatus = "saujanashafi/esp/start/status";
-const char *topicGPS = "saujanashafi/esp/gps";
-
-#include <TinyGsmClient.h>
-#include <PubSubClient.h>
-#include <TinyGPSPlus.h>
-#include <SSLClient.h>
-
-// The TinyGsm modem & MQTT Client
+#ifdef DUMP_AT_COMMANDS
+#include <StreamDebugger.h>
+StreamDebugger debugger(SerialAT, SerialMon);
+TinyGsm modem(debugger);
+#else
 TinyGsm modem(SerialAT);
-TinyGsmClientSecure client(modem);
+#endif
+TinyGsmClient client(modem);
 SSLClient sslClient(&client);
 PubSubClient mqtt(sslClient);
 
-// The TinyGPSPlus object
-TinyGPSPlus gps;
-
-// Updating location concurrently
-TaskHandle_t gpsTask;
-
-// Assigning GPS to serial port 1
-HardwareSerial SerialPort(1);
-
-struct location
-{
-  double lat;
-  double lng;
-};
-
-#define RST_GSM 5
-#define RELAY_PIN 15
-int engineStatus = LOW;
-int startStatus = LOW;
+#define LED_PIN 13
+int ledStatus = LOW;
 
 uint32_t lastReconnectAttempt = 0;
 
-location currentLocation;
-
-String msg, lastMsg;
-
 // Last message sent
-long lastSent = 0;
+long lastMsg = 0;
 
 void mqttCallback(char *topic, byte *payload, unsigned int len)
 {
@@ -116,30 +111,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int len)
   SerialMon.write(payload, len);
   SerialMon.println();
 
-  if (len == 1)
+  // Only proceed if incoming message's topic matches
+  if (String(topic) == topicLed)
   {
-    // Only proceed if incoming message's topic matches
-    if (String(topic) == topicEngine)
-    {
-      if ((char)payload[0] == '1')
-        engineStatus = HIGH;
-      else if ((char)payload[0] == '0')
-        engineStatus = LOW;
-      digitalWrite(RELAY_PIN, engineStatus);
-      mqtt.publish(topicEngineStatus, engineStatus ? "1" : "0", true);
-      SerialMon.println(engineStatus ? "Engine on..." : "Engine off...");
-    }
-
-    // Only proceed if incoming message's topic matches
-    if (String(topic) == topicStart)
-    {
-      if ((char)payload[0] == '1')
-        startStatus = HIGH;
-      else if ((char)payload[0] == '0')
-        startStatus = LOW;
-      mqtt.publish(topicStartStatus, startStatus ? "1" : "0", true);
-      SerialMon.println(startStatus ? "Start tracking..." : "Stop tracking...");
-    }
+    ledStatus = !ledStatus;
+    digitalWrite(LED_PIN, ledStatus);
+    mqtt.publish(topicLedStatus, ledStatus ? "1" : "0");
   }
 }
 
@@ -149,7 +126,10 @@ boolean mqttConnect()
   SerialMon.print(broker);
 
   // Connect to MQTT Broker
-  boolean status = mqtt.connect("SaujanaShafiGPS");
+  boolean status = mqtt.connect("SaujanaShafiGPS", mqttUser, mqttPass);
+
+  // Or, if you want to authenticate MQTT:
+  // boolean status = mqtt.connect("GsmClientName", "mqtt_user", "mqtt_pass");
 
   if (status == false)
   {
@@ -157,31 +137,8 @@ boolean mqttConnect()
     return false;
   }
   SerialMon.println(" success");
-  mqtt.subscribe(topicEngine);
-  mqtt.subscribe(topicStart);
+  mqtt.subscribe(topicLed);
   return mqtt.connected();
-}
-
-void updateLocation(void *pvParameters)
-{
-  for (;;)
-  {
-    while (SerialGPS.available())
-    {
-      if (gps.encode(SerialGPS.read()))
-      {
-        if (gps.location.isValid())
-        {
-          currentLocation.lat = gps.location.lat();
-          currentLocation.lng = gps.location.lng();
-        }
-        else
-          continue;
-      }
-    };
-
-    delay(500);
-  }
 }
 
 void setup()
@@ -190,51 +147,36 @@ void setup()
   SerialMon.begin(115200);
   delay(10);
 
-  pinMode(RELAY_PIN, OUTPUT);
-
-  currentLocation.lat = -7.989723;
-  currentLocation.lng = 103.628453;
+  pinMode(LED_PIN, OUTPUT);
 
   // !!!!!!!!!!!
   // Set your reset, enable, power pins here
   // !!!!!!!!!!!
-  pinMode(RST_GSM, OUTPUT);
-  digitalWrite(RST_GSM, HIGH);
 
   SerialMon.println("Wait...");
 
   // Set GSM module baud rate
+  // TinyGsmAutoBaud(SerialAT, GSM_AUTOBAUD_MIN, GSM_AUTOBAUD_MAX);
   SerialAT.begin(115200);
-  SerialGPS.begin(9600, SERIAL_8N1, 4, 2);
-
-  xTaskCreatePinnedToCore(
-      updateLocation, /* Task function. */
-      "GPS Task",     /* name of task. */
-      10000,          /* Stack size of task */
-      NULL,           /* parameter of the task */
-      1,              /* priority of the task */
-      &gpsTask,       /* Task handle to keep track of created task */
-      0);
-
-  sslClient.setCACert(root_ca);
-
   delay(6000);
 
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem...");
-  // modem.restart();
-  modem.init();
+  modem.restart();
+  // modem.init();
 
   String modemInfo = modem.getModemInfo();
   SerialMon.print("Modem Info: ");
   SerialMon.println(modemInfo);
 
+#if TINY_GSM_USE_GPRS
   // Unlock your SIM card with a PIN if needed
   if (GSM_PIN && modem.getSimStatus() != 3)
   {
     modem.simUnlock(GSM_PIN);
   }
+#endif
 
   SerialMon.print("Waiting for network...");
   if (!modem.waitForNetwork())
@@ -250,6 +192,7 @@ void setup()
     SerialMon.println("Network connected");
   }
 
+#if TINY_GSM_USE_GPRS
   // GPRS connection parameters are usually set after network registration
   SerialMon.print(F("Connecting to "));
   SerialMon.print(apn);
@@ -265,19 +208,14 @@ void setup()
   {
     SerialMon.println("GPRS connected");
   }
+#endif
+
+  sslClient.setCACert(root_ca);
+  sslClient.setTimeout(15000);
 
   // MQTT Broker setup
-  mqtt.setServer(broker, 8883);
+  mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
-
-  // while (currentLocation.lat == NULL && currentLocation.lng == NULL)
-  // {
-  //   SerialMon.print(".");
-
-  //   delay(500);
-  // }
-
-  SerialMon.println();
 }
 
 void loop()
@@ -297,6 +235,7 @@ void loop()
       SerialMon.println("Network re-connected");
     }
 
+#if TINY_GSM_USE_GPRS
     // and make sure GPRS/EPS is still connected
     if (!modem.isGprsConnected())
     {
@@ -314,6 +253,7 @@ void loop()
         SerialMon.println("GPRS reconnected");
       }
     }
+#endif
   }
 
   if (!mqtt.connected())
@@ -334,18 +274,11 @@ void loop()
   }
 
   long now = millis();
-  if ((now - lastSent > 30000) && startStatus)
+  if (now - lastMsg > 30000)
   {
-    msg = String(currentLocation.lat, 6U) + "," + String(currentLocation.lng, 6U);
+    lastMsg = now;
 
-    if (msg != lastMsg)
-    {
-      lastSent = now;
-
-      mqtt.publish(topicGPS, msg.c_str());
-      SerialMon.println("Published message: " + msg);
-      lastMsg = msg;
-    }
+    mqtt.publish(topicInit, "GsmClientTest started");
   }
 
   mqtt.loop();
