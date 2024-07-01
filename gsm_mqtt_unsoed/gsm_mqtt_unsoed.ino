@@ -1,318 +1,292 @@
-// Select your modem:
-#define TINY_GSM_MODEM_SIM800
+/**************************************************************
+ *  Works - 31/05/2021 - Telemetry + Device Twin
+ * ESP32 LilyGo-T-Call-SIM800 Example
+ *
+ * HTTPS (TLS/SLL) with CA Certificate via "TinyGsm.h": https://github.com/vshymanskyy/TinyGSM
+ * Tested on SIM800L_IP5306_VERSION_20190610 (v1.3) (R14.18)
+ *
+ * About board: https://github.com/Xinyuan-LilyGO/LilyGo-T-Call-SIM800
+ * About SIM800L_IP5306 v1.3: https://github.com/Xinyuan-LilyGO/LilyGo-T-Call-SIM800/blob/master/doc/SIM800L_IP5306.MD
+ * Base example: https://github.com/Xinyuan-LilyGO/LilyGo-T-Call-SIM800/tree/master/examples/Arduino_TinyGSM
+ *
+ *
+ * Adapted by Reinaldo Abreu
+ **************************************************************/
+#include <Wire.h>
+#include "SSLClient.h"
 
-// Set serial for debug console (to the Serial Monitor, default speed 115200)
-#define SerialMon Serial
-
-// Set serial for AT commands (to the module)
-#define SerialAT Serial2
-
-// Define the serial console for debug prints, if needed
-#define TINY_GSM_DEBUG SerialMon
-
-// Define how you're planning to connect to the internet.
-// This is only needed for this example, not in other code.
-#define TINY_GSM_USE_GPRS true
-#define TINY_GSM_USE_WIFI false
-
-// set GSM PIN, if any
-#define GSM_PIN ""
-
-// Your GPRS credentials, if any
-const char apn[] = "Telkomsel";
-const char gprsUser[] = "wap";
-const char gprsPass[] = "wap123";
-
-// Your WiFi connection credentials, if applicable
-const char wifiSSID[] = "YourSSID";
-const char wifiPass[] = "YourWiFiPass";
-
-// MQTT details
-const char *broker = "103.9.22.243";
-
-const char *topicEngine = "saujanashafi/esp/engine";
-const char *topicEngineStatus = "saujanashafi/esp/engine/status";
-const char *topicStart = "saujanashafi/esp/start";
-const char *topicStartStatus = "saujanashafi/esp/start/status";
-const char *topicGPS = "saujanashafi/esp/gps";
-
-#include <TinyGsmClient.h>
+// MQTT Client lib: https://github.com/knolleary/pubsubclient
 #include <PubSubClient.h>
-#include <TinyGPSPlus.h>
 
-// The TinyGsm modem & MQTT Client
-TinyGsm modem(SerialAT);
-TinyGsmClient client(modem);
-PubSubClient mqtt(client);
+// Please enter your CA certificate in ca_cert.h
+#include "ca_cert.h"
 
-// The TinyGPSPlus object
-TinyGPSPlus gps;
+// ESP32 LilyGo-T-Call-SIM800 SIM800L_IP5306_VERSION_20190610 (v1.3) pins definition
+#define MODEM_RST 5
+#define MODEM_PWRKEY 4
+#define MODEM_POWER_ON 23
+#define MODEM_TX 27
+#define MODEM_RX 26
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define LED_GPIO 13
+#define LED_PIN 13
+#define LED_ON HIGH
+#define LED_OFF LOW
+#define IP5306_ADDR 0x75
+#define IP5306_REG_SYS_CTL0 0x00
 
-// Updating location concurrently
-TaskHandle_t gpsTask;
+// Set serial for debug console (to the Serial Monitor)
+#define SerialMon Serial
+// Set serial for AT commands (to the SIM800 module)
+#define SerialAT Serial1
 
-// Assigning GPS to serial port 1
-HardwareSerial SerialPort(1);
+#define TINY_GSM_DEBUG SerialMon
+// #define DUMP_AT_COMMANDS          //Uncomment to see AT commands on Serial
 
-struct location
+// Configure TinyGSM library
+#define TINY_GSM_MODEM_SIM800   // Modem is SIM800
+#define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
+
+// Include after TinyGSM definitions
+#include <TinyGsmClient.h>
+
+// Your GPRS credentials (leave empty, if missing)
+const char apn[] = "";       // Your APN
+const char gprs_user[] = ""; // User
+const char gprs_pass[] = ""; // Password
+const char simPIN[] = "";    // SIM card PIN code, if any
+
+// MQTT Config
+
+const char mqtt_broker[] = "CHANGE_TO_AZURE_IOT_HUB_NAME.azure-devices.net";
+#define MQTT_DEVICE "CHANGE_TO_DEVICE_NAME_AZURE_IOT_HUB" // Device name on Azure IoT Hub
+#define MQTT_USERNAME "CHANGE_TO_AZURE_IOT_HUB_NAME.azure-devices.net/CHANGE_TO_DEVICE_NAME_AZURE_IOT_HUB/?api-version=2020-09-30&DeviceClientType=c%2F1.2.0-beta.1"
+// Password Empty to x509 SelfSigned Device or SharedAccessSignature... to SaS Device
+#define MQTT_PASS ""
+// #define MQTT_PASS "SharedAccessSignature sr=CHANGE_TO_AZURE_IOT_HUB_NAME.azure-devices.net%2Fdevices%2FCHANGE_TO_DEVICE_NAME_AZURE_IOT_HUB..." //Check SaS Documentation
+
+int secure_port = 8883; // TCP-TLS Port
+
+#ifdef DUMP_AT_COMMANDS
+#include <StreamDebugger.h>
+StreamDebugger debugger(SerialAT, SerialMon);
+TinyGsm sim_modem(debugger);
+#else
+TinyGsm sim_modem(SerialAT);
+#endif
+
+// Layers stack
+// TinyGsm sim_modem(SerialAT);
+TinyGsmClient gsm_transpor_layer(sim_modem);
+SSLClient secure_presentation_layer(&gsm_transpor_layer);
+PubSubClient client(secure_presentation_layer);
+
+// Power configuration for SIM800L_IP5306_VERSION_20190610 (v1.3) board
+bool setupPMU()
 {
-  double lat;
-  double lng;
-};
-
-#define RST_GSM 5
-
-#define RELAY_PIN 15
-int engineStatus = LOW;
-int startStatus = LOW;
-
-uint32_t lastReconnectAttempt = 0;
-
-location currentLocation;
-
-String msg, lastMsg;
-
-// Last message sent
-long lastSent = 0;
-
-void mqttCallback(char *topic, byte *payload, unsigned int len)
-{
-  SerialMon.print("Message arrived [");
-  SerialMon.print(topic);
-  SerialMon.print("]: ");
-  SerialMon.write(payload, len);
-  SerialMon.println();
-
-  if (len == 1)
+  bool en = true;
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.beginTransmission(IP5306_ADDR);
+  Wire.write(IP5306_REG_SYS_CTL0);
+  if (en)
   {
-    // Only proceed if incoming message's topic matches
-    if (String(topic) == topicEngine)
-    {
-      if ((char)payload[0] == '1')
-        engineStatus = HIGH;
-      else if ((char)payload[0] == '0')
-        engineStatus = LOW;
-      digitalWrite(RELAY_PIN, engineStatus);
-      mqtt.publish(topicEngineStatus, engineStatus ? "1" : "0", true);
-      SerialMon.println(engineStatus ? "Engine on..." : "Engine off...");
-    }
+    Wire.write(0x37);
+  }
+  else
+  {
+    Wire.write(0x35);
+  }
+  return Wire.endTransmission() == 0;
+}
 
-    // Only proceed if incoming message's topic matches
-    if (String(topic) == topicStart)
+// For read the MQTT events
+void callback(char *topic, byte *payload, unsigned int length)
+{
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++)
+  {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+// To connect to the broker
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected())
+  {
+    Serial.println("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect(MQTT_DEVICE, MQTT_USERNAME, MQTT_PASS))
+    // if (client.connect(client_name))
     {
-      if ((char)payload[0] == '1')
-        startStatus = HIGH;
-      else if ((char)payload[0] == '0')
-        startStatus = LOW;
-      mqtt.publish(topicStartStatus, startStatus ? "1" : "0", true);
-      SerialMon.println(startStatus ? "Start tracking..." : "Stop tracking...");
+      Serial.println("-----------------------------------connected-----------------------");
+      // Once connected, publish an announcement...
+      // client.publish("outTopic", "hello world");
+      client.publish("devices/CHANGE_TO_DEVICE_NAME_AZURE_IOT_HUB/messages/events/", "Test"); // Topic to publish telemetry
+
+      // ... and resubscribe
+      client.subscribe("$iothub/twin/PATCH/properties/desired/#"); // Topic to subscribe Device Twin
+    }
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println("...try again in 5 seconds");
+      delay(5000);
     }
   }
 }
 
-boolean mqttConnect()
+// Modem initial setup (cold start)
+void setupModem()
 {
-  SerialMon.print("Connecting to ");
-  SerialMon.print(broker);
+  pinMode(MODEM_RST, OUTPUT);
+  pinMode(MODEM_PWRKEY, OUTPUT);
+  pinMode(MODEM_POWER_ON, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
 
-  // Connect to MQTT Broker
-  boolean status = mqtt.connect("SaujanaShafiGPS");
+  // Reset pin high
+  digitalWrite(MODEM_RST, HIGH);
 
-  if (status == false)
-  {
-    SerialMon.println(" fail");
-    return false;
-  }
-  SerialMon.println(" success");
-  mqtt.subscribe(topicEngine);
-  mqtt.subscribe(topicStart);
-  return mqtt.connected();
-}
+  // Turn on the Modem power first
+  digitalWrite(MODEM_POWER_ON, HIGH);
 
-void updateLocation(void *pvParameters)
-{
-  for (;;)
-  {
-    while (SerialPort.available())
-    {
-      if (gps.encode(SerialPort.read()))
-      {
-        if (gps.location.isValid())
-        {
-          currentLocation.lat = gps.location.lat();
-          currentLocation.lng = gps.location.lng();
-        }
-        else
-          continue;
-      }
-    };
+  // Pull down PWRKEY for more than 1 second according to manual requirements
+  digitalWrite(MODEM_PWRKEY, HIGH);
+  delay(200);
+  digitalWrite(MODEM_PWRKEY, LOW);
+  delay(1200);
+  digitalWrite(MODEM_PWRKEY, HIGH);
 
-    delay(500);
-  }
+  // Initialize the indicator as an output
+  digitalWrite(LED_PIN, LOW);
 }
 
 void setup()
 {
-  // Set console baud rate
   SerialMon.begin(115200);
   delay(10);
 
-  pinMode(RELAY_PIN, OUTPUT);
-
-  currentLocation.lat = -7.989723;
-  currentLocation.lng = 103.628453;
-
-  // !!!!!!!!!!!
-  // Set your reset, enable, power pins here
-  // !!!!!!!!!!!
-  pinMode(RST_GSM, OUTPUT);
-  digitalWrite(RST_GSM, HIGH);
-  modem.restart();
-
-  SerialMon.println("Wait...");
-
-  // Set GSM module baud rate
-  SerialAT.begin(115200);
-  SerialPort.begin(9600, SERIAL_8N1, 4, 2);
-
-  xTaskCreatePinnedToCore(
-      updateLocation, /* Task function. */
-      "GPS Task",     /* name of task. */
-      10000,          /* Stack size of task */
-      NULL,           /* parameter of the task */
-      1,              /* priority of the task */
-      &gpsTask,       /* Task handle to keep track of created task */
-      0);
-
-  delay(6000);
-
-  // Restart takes quite some time
-  // To skip it, call init() instead of restart()
-  SerialMon.println("Initializing modem...");
-  // modem.restart();
-  modem.init();
-
-  String modemInfo = modem.getModemInfo();
-  SerialMon.print("Modem Info: ");
-  SerialMon.println(modemInfo);
-
-  // Unlock your SIM card with a PIN if needed
-  if (GSM_PIN && modem.getSimStatus() != 3)
+  // Start power management
+  if (!setupPMU())
   {
-    modem.simUnlock(GSM_PIN);
+    Serial.println("Setting power error");
   }
 
-  SerialMon.print("Waiting for network...");
-  if (!modem.waitForNetwork())
-  {
-    SerialMon.println(" fail");
-    delay(10000);
-    return;
-  }
-  SerialMon.println(" success");
+  // Set SIM module baud rate and UART pins
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
 
-  if (modem.isNetworkConnected())
-  {
-    SerialMon.println("Network connected");
-  }
+  // Add CA Certificate
+  secure_presentation_layer.setCACert(root_ca);
+  secure_presentation_layer.setCertificate(client_cert_pem_start); // x509 client Certificate
+  secure_presentation_layer.setPrivateKey(client_key_pem_start);   // x509 client key
 
-  // GPRS connection parameters are usually set after network registration
-  SerialMon.print(F("Connecting to "));
-  SerialMon.print(apn);
-  if (!modem.gprsConnect(apn, gprsUser, gprsPass))
-  {
-    SerialMon.println(" fail");
-    delay(10000);
-    return;
-  }
-  SerialMon.println(" success");
+  // Modem initial setup
+  setupModem();
 
-  if (modem.isGprsConnected())
-  {
-    SerialMon.println("GPRS connected");
-  }
-
-  // MQTT Broker setup
-  mqtt.setServer(broker, 1883);
-  mqtt.setCallback(mqttCallback);
-
-  while (currentLocation.lat == NULL && currentLocation.lng == NULL)
-  {
-    SerialMon.print(".");
-
-    delay(500);
-  }
-
-  SerialMon.println();
+  // MQTT init
+  client.setServer(mqtt_broker, secure_port);
+  client.setCallback(callback);
 }
 
 void loop()
 {
-  // Make sure we're still registered on the network
-  if (!modem.isNetworkConnected())
+  SerialMon.print("Initializing modem...");
+  if (!sim_modem.init())
   {
-    SerialMon.println("Network disconnected");
-    if (!modem.waitForNetwork(180000L, true))
+    SerialMon.print(" fail... restarting modem...");
+    setupModem();
+    // Restart takes quite some time
+    // Use modem.init() if you don't need the complete restart
+    if (!sim_modem.restart())
     {
-      SerialMon.println(" fail");
-      delay(10000);
+      SerialMon.println(" fail... even after restart");
       return;
     }
-    if (modem.isNetworkConnected())
-    {
-      SerialMon.println("Network re-connected");
-    }
+  }
+  SerialMon.println(" OK");
 
-    // and make sure GPRS/EPS is still connected
-    if (!modem.isGprsConnected())
-    {
-      SerialMon.println("GPRS disconnected!");
-      SerialMon.print(F("Connecting to "));
-      SerialMon.print(apn);
-      if (!modem.gprsConnect(apn, gprsUser, gprsPass))
-      {
-        SerialMon.println(" fail");
-        delay(10000);
-        return;
-      }
-      if (modem.isGprsConnected())
-      {
-        SerialMon.println("GPRS reconnected");
-      }
-    }
+  // General information
+  String name = sim_modem.getModemName();
+  Serial.println("Modem Name: " + name);
+  String modem_info = sim_modem.getModemInfo();
+  Serial.println("Modem Info: " + modem_info);
+
+  // Unlock your SIM card with a PIN if needed
+  if (strlen(simPIN) && sim_modem.getSimStatus() != 3)
+  {
+    sim_modem.simUnlock(simPIN);
   }
 
-  if (!mqtt.connected())
+  // Wait for network availability
+  SerialMon.print("Waiting for network...");
+  if (!sim_modem.waitForNetwork(240000L))
   {
-    SerialMon.println("=== MQTT NOT CONNECTED ===");
-    // Reconnect every 10 seconds
-    uint32_t t = millis();
-    if (t - lastReconnectAttempt > 10000L)
-    {
-      lastReconnectAttempt = t;
-      if (mqttConnect())
-      {
-        lastReconnectAttempt = 0;
-      }
-    }
-    delay(100);
+    SerialMon.println(" fail");
+    delay(10000);
     return;
   }
+  SerialMon.println(" OK");
 
-  long now = millis();
-  if ((now - lastSent > 30000) && startStatus)
+  // Connect to the GPRS network
+  SerialMon.print("Connecting to network...");
+  if (!sim_modem.isNetworkConnected())
   {
-    msg = String(currentLocation.lat, 6U) + "," + String(currentLocation.lng, 6U);
+    SerialMon.println(" fail");
+    delay(10000);
+    return;
+  }
+  SerialMon.println(" OK");
 
-    if (msg != lastMsg)
+  // Connect to APN
+  SerialMon.print(F("Connecting to APN: "));
+  SerialMon.print(apn);
+  if (!sim_modem.gprsConnect(apn, gprs_user, gprs_pass))
+  {
+    SerialMon.println(" fail");
+    delay(10000);
+    return;
+  }
+  digitalWrite(LED_PIN, HIGH);
+  SerialMon.println(" OK");
+
+  // More info..
+  Serial.println("");
+  String ccid = sim_modem.getSimCCID();
+  Serial.println("CCID: " + ccid);
+  String imei = sim_modem.getIMEI();
+  Serial.println("IMEI: " + imei);
+  String cop = sim_modem.getOperator();
+  Serial.println("Operator: " + cop);
+  IPAddress local = sim_modem.localIP();
+  Serial.println("Local IP: " + String(local));
+  int csq = sim_modem.getSignalQuality();
+  Serial.println("Signal quality: " + String(csq));
+
+  // MQTT Test loop
+  // As long as we have connectivity
+  while (sim_modem.isGprsConnected())
+  {
+    // We maintain connectivity with the broker
+    if (!client.connected())
     {
-      lastSent = now;
-
-      mqtt.publish(topicGPS, msg.c_str());
-      SerialMon.println("Published message: " + msg);
-      lastMsg = msg;
+      reconnect();
     }
+    // We are listening to the events
+    client.loop();
   }
 
-  mqtt.loop();
+  // Disconnect GPRS and PowerOff
+  // Apparently the "gprsDisconnect()" method (TinyGSM) are not working well with the SIM7000...
+  // ...you have to use additionally "poweroff()".
+  // With that, the modem can be connected again in the next cycle of the loop.
+  // sim_modem.gprsDisconnect();
+  // sim_modem.poweroff();
+
+  delay(15000);
 }
